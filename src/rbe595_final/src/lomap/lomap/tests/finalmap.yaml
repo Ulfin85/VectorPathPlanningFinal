@@ -1,0 +1,40 @@
+!Ts
+name: Simple network
+directed: false
+multi: false
+init: ['Load']
+final: []
+graph:
+  nodes:
+    Load:
+      prop: !!set {'load': null}
+      location: !!python/tuple [-1.5, -0.5]
+    Charge:
+      prop: !!set {'charge': null}
+      location: !!python/tuple [1.5, -0.5]
+    A:
+      prop: !!set {'a': null}
+      location: !!python/tuple [-1.5, 0.5]
+    B:
+      prop: !!set {'b': null}
+      location: !!python/tuple [1.5, 0.5]
+    C:
+      prop: !!set {'c': null}
+      location: !!python/tuple [0.0, -0.5]
+    H:
+      prop: !!set {'h': null}
+      location: !!python/tuple [0.0, 0.0]
+  edges:
+  - [Load, H, {'weight': 1}]
+  - [Charge, H, {'weight': 1}]
+  - [A, H, {'weight': 1}]
+  - [B, H, {'weight': 1}]
+  - [C, H, {'weight': 1}]
+  - [A, A, {'weight': 1}]
+  - [B, B, {'weight': 1}]
+  - [C, C, {'weight': 1}]
+  - [H, H, {'weight': 1}]
+  - [Load, Load, {'weight': 1}]
+  - [Charge, Charge, {'weight': 1}]
+  
+
