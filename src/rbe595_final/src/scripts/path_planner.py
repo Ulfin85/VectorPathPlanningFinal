@@ -1,116 +1,149 @@
 #!/usr/bin/env python3
 
 import rospy
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
+from geometry_msgs.msg import Twist, Point
 import numpy as np
-import math
 
 class VectorFieldPathPlanning:
     def __init__(self):
         rospy.init_node('vector_field_path_planning')
-        self.cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
-        self.odom_sub = rospy.Subscriber('/odom', Odometry, self.odom_callback)
-        self.laser_sub = rospy.Subscriber('/scan', LaserScan, self.laser_callback)
-        self.map_sub = rospy.Subscriber('/map', OccupancyGrid, self.map_callback)
-        self.robot_pose = None
-        self.obstacle_ranges = None
-        self.goal = (1.5, -0.5)  # Example goal position
+
+        # Initialize subscribers
+        rospy.Subscriber('/map', OccupancyGrid, self.map_callback)
+        rospy.Subscriber('/odom', Odometry, self.odom_callback)
+
+        # Initialize publisher
+        self.velocity_publisher = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+
+        # Initialize variables
         self.map_data = None
+        self.robot_pose = None
+        self.goal_position = None
 
-    def odom_callback(self, msg):
-        self.robot_pose = msg.pose.pose
+        # Set maximum speeds
+        self.max_linear_speed = 0.1  # m/s
+        self.max_angular_speed = 0.7  # rad/s
 
-    def laser_callback(self, msg):
-        self.obstacle_ranges = msg.ranges
+    def map_callback(self, map_msg):
+        # Update map data
+        self.map_data = map_msg
 
-    def map_callback(self, msg):
-        self.map_data = np.array(msg.data).reshape((msg.info.height, msg.info.width))
+    def odom_callback(self, odom_msg):
+        # Update robot's pose
+        self.robot_pose = odom_msg.pose.pose.position
 
-    def calculate_vector_field(self):
-        if self.robot_pose is None or self.obstacle_ranges is None or self.map_data is None:
+    def set_goal(self, goal_position):
+        # Set the goal position
+        self.goal_position = goal_position
+
+    def calculate_repulsive_force(self, robot_x, robot_y):
+        if self.map_data is None:
             return 0, 0
 
-        robot_x = self.robot_pose.position.x
-        robot_y = self.robot_pose.position.y
+        # Convert occupancy grid to numpy array
+        map_array = np.array(self.map_data.data).reshape((self.map_data.info.height, self.map_data.info.width))
 
-        attractive_force_x = self.goal[0] - robot_x
-        attractive_force_y = self.goal[1] - robot_y
+        # Constants for repulsion behavior
+        k_rep = 40.0  # Repulsion coefficient
+        min_dist = 0.01  # Minimum distance to consider repulsion
+        
 
-        for i, distance in enumerate(self.obstacle_ranges):
-            if distance < 0.03:  # Threshold distance to obstacles
-                angle = self.laser_to_angle(i, len(self.obstacle_ranges))
-                repulsive_force_x = -math.cos(angle)
-                repulsive_force_y = -math.sin(angle)
-                attractive_force_x += repulsive_force_x
-                attractive_force_y += repulsive_force_y
+        # Initialize repulsive force components
+        F_rep_x = 0
+        F_rep_y = 0
 
-        # Apply repulsive forces based on map data
-        map_resolution = 0.05  # meters per cell
-        map_origin_x = -10.0
-        map_origin_y = -10.0
-        robot_grid_x = int((robot_x - map_origin_x) / map_resolution)
-        robot_grid_y = int((robot_y - map_origin_y) / map_resolution)
+        # Iterate through the neighborhood of the robot's position
+        for y in range(max(0, robot_y - 5), min(self.map_data.info.height, robot_y + 6)):
+            for x in range(max(0, robot_x - 5), min(self.map_data.info.width, robot_x + 6)):
+                # Calculate distance to obstacle
+                if map_array[y, x] > 0:  # Obstacle detected
+                    dist_x = (robot_x - x) * self.map_data.info.resolution
+                    dist_y = (robot_y - y) * self.map_data.info.resolution
+                    dist = np.sqrt(dist_x**2 + dist_y**2)
 
-        repulsive_force_x_map = 0
-        repulsive_force_y_map = 0
+                    if dist < min_dist:
+                        dist = min_dist
 
-        for i in range(-5, 6):  # Consider neighboring cells
-            for j in range(-5, 6):
-                x = robot_grid_x + i
-                y = robot_grid_y + j
-                if 0 <= x < self.map_data.shape[1] and 0 <= y < self.map_data.shape[0]:
-                    if self.map_data[y, x] > 0:  # Cell is occupied
-                        dx = robot_x - (x * map_resolution + map_origin_x)
-                        dy = robot_y - (y * map_resolution + map_origin_y)
-                        distance = math.sqrt(dx ** 2 + dy ** 2)
-                        if distance > 0:
-                            repulsive_force_x_map += dx / distance ** 3
-                            repulsive_force_y_map += dy / distance ** 3
+                    # Calculate repulsive force components
+                    F_rep_x += k_rep / dist**2 * (dist_x / dist)
+                    F_rep_y += k_rep / dist**2 * (dist_y / dist)
 
-        attractive_force_x += repulsive_force_x_map
-        attractive_force_y += repulsive_force_y_map
+        return F_rep_x, F_rep_y
 
-        return attractive_force_x, attractive_force_y
+    def calculate_vector_field(self):
+        if self.map_data is None or self.robot_pose is None or self.goal_position is None:
+            return None
+        
+        # Calculate robot's grid position
+        robot_x = int((self.robot_pose.x - self.map_data.info.origin.position.x) / self.map_data.info.resolution)
+        robot_y = int((self.robot_pose.y - self.map_data.info.origin.position.y) / self.map_data.info.resolution)
 
-    def laser_to_angle(self, index, num_readings):
-        angle_min = -math.pi / 2
-        angle_max = math.pi / 2
-        angle_increment = (angle_max - angle_min) / (num_readings - 1)
-        return angle_min + index * angle_increment
+        # Calculate repulsive force
+        F_rep_x, F_rep_y = self.calculate_repulsive_force(robot_x, robot_y)
 
-    def run(self):
+        # Calculate attractive force towards the goal
+        F_attr_x = self.goal_position.x - self.robot_pose.x
+        F_attr_y = self.goal_position.y - self.robot_pose.y
+
+        # Normalize the attractive force
+        attr_magnitude = np.sqrt(F_attr_x**2 + F_attr_y**2)
+        if attr_magnitude != 0:
+            F_attr_x /= attr_magnitude
+            F_attr_y /= attr_magnitude
+
+        #Scaling value to make attractive force towards goal more powerful
+        attK = 2000
+        # Combine attractive and repulsive forces
+        F_total_x = F_attr_x * attK + F_rep_x
+        F_total_y = F_attr_y * attK + F_rep_y
+        
+        # Normalize the total force
+        total_magnitude = np.sqrt(F_total_x**2 + F_total_y**2)
+        if total_magnitude != 0:
+            F_total_x /= total_magnitude
+            F_total_y /= total_magnitude
+            print(F_total_x,F_total_y)
+
+        return F_total_x, F_total_y
+
+    def navigate_towards_goal(self):
         rate = rospy.Rate(10)  # 10 Hz
         while not rospy.is_shutdown():
-            vector_field_x, vector_field_y = self.calculate_vector_field()
+            if self.map_data is not None and self.robot_pose is not None and self.goal_position is not None:
+                # Calculate vector field
+                vector_field_x, vector_field_y = self.calculate_vector_field()
 
-            # Normalize the vector field
-            magnitude = math.sqrt(vector_field_x ** 2 + vector_field_y ** 2)
-            if magnitude > 0.0:
-                vector_field_x /= magnitude
-                vector_field_y /= magnitude
-                if vector_field_x > 0.12:
-                    vector_field_x = 0.12
-                if vector_field_y > 0.12:
-                    vector_field_y = 0.12
-                if vector_field_x < -0.12:
-                    vector_field_x = -0.12
-                if vector_field_y < -0.12:
-                    vector_field_y = -0.12 
+                # Calculate angular.z (rotation)
+                angle_to_goal = np.arctan2(vector_field_y, vector_field_x)
+                angular_z = np.clip(angle_to_goal, -self.max_angular_speed, self.max_angular_speed)
 
-            cmd_vel_msg = Twist()
-            cmd_vel_msg.linear.x = vector_field_x
-            cmd_vel_msg.linear.y = vector_field_y
-            self.cmd_vel_pub.publish(cmd_vel_msg)
+                # Set linear.x to move forward
+                linear_x = np.clip(self.max_linear_speed, -self.max_linear_speed, self.max_linear_speed)
+
+                # Create Twist message
+                twist_msg = Twist()
+                twist_msg.linear.x = linear_x
+                twist_msg.angular.z = angular_z
+
+                # Publish velocity commands
+                self.velocity_publisher.publish(twist_msg)
 
             rate.sleep()
 
 if __name__ == '__main__':
     try:
-        vfp = VectorFieldPathPlanning()
-        vfp.run()
+        path_planner = VectorFieldPathPlanning()
+
+        # Set a sample goal position
+        goal_position = Point()
+        goal_position.x = 1.5
+        goal_position.y = -0.5
+        path_planner.set_goal(goal_position)
+
+        # Start navigating towards the goal
+        path_planner.navigate_towards_goal()
+
     except rospy.ROSInterruptException:
         pass
 
