@@ -1,0 +1,8 @@
+prefix=/home/ulfin/catkin_ws/install
+
+Name: rbe595_final
+Description: Description of rbe595_final
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 
